@@ -1,0 +1,142 @@
+
+name: Build and Release
+
+on:
+  push:
+    branches: [ "master" ]
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: mihomo-connections-tracker
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            backend/target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests
+        run: cargo test --verbose
+        working-directory: ./backend
+
+  build-release:
+    name: Build Release
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: "mihomo-connections-tracker-linux-amd64"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            name: "mihomo-connections-tracker-linux-arm64-musl"
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: "mihomo-connections-tracker-macos-amd64"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: "mihomo-connections-tracker-macos-arm64"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: "mihomo-connections-tracker-windows-amd64.exe"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            backend/target/
+          key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Install cross-compilation dependencies (for musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+          # Install musl libc for aarch64
+          wget https://musl.cc/aarch64-linux-musl-cross.tgz
+          tar -xzf aarch64-linux-musl-cross.tgz
+          echo "$PWD/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: ./backend
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          # OpenSSL configuration for musl builds
+          OPENSSL_STATIC: 1
+          OPENSSL_DIR: ${{ matrix.target == 'aarch64-unknown-linux-musl' && '/usr/aarch64-linux-gnu' || '' }}
+          PKG_CONFIG_ALLOW_CROSS: 1
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv backend/target/${{ matrix.target }}/release/mihomo-connections-tracker.exe ${{ matrix.name }}
+          else
+            mv backend/target/${{ matrix.target }}/release/mihomo-connections-tracker ${{ matrix.name }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  create-release:
+    name: Create Release
+    needs: build-release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --repo ${{ github.repository }} \
+            --title "Release ${{ github.ref_name }}" \
+            --generate-notes \
+            artifacts/**/*
