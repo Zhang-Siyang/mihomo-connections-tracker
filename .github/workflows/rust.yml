@@ -9,7 +9,6 @@ on:
   pull_request:
     branches: [ "master" ]
 
-# 取消正在进行的相同工作流
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -62,7 +61,11 @@ jobs:
             name: "mihomo-connections-tracker-linux-amd64"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            name: "mihomo-connections-tracker-linux-arm64-musl"
+            name: "mihomo-connections-tracker-linux-arm64-musl-static"
+            features: "openssl/vendored"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            name: "mihomo-connections-tracker-linux-arm64"
           - os: macos-latest
             target: x86_64-apple-darwin
             name: "mihomo-connections-tracker-macos-amd64"
@@ -98,19 +101,26 @@ jobs:
             ${{ runner.os }}-cargo-
       
       - name: Install cross-compilation tool
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+        if: contains(matrix.target, 'aarch64') && contains(matrix.target, 'linux')
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build binary
         run: |
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+          FEATURES="${{ matrix.features }}"
+          TOOL="cargo"
+          [[ "${{ matrix.target }}" == *"aarch64"* ]] && [[ "${{ matrix.target }}" == *"linux"* ]] && TOOL="cross"
+          
+          $TOOL build --release --target ${{ matrix.target }} ${FEATURES:+--features $FEATURES}
         working-directory: ./backend
         shell: bash
+
+      - name: Display binary size
+        shell: bash
+        run: |
+          BINARY="backend/target/${{ matrix.target }}/release/mihomo-connections-tracker"
+          [[ "${{ matrix.os }}" == "windows-latest" ]] && BINARY="${BINARY}.exe"
+          ls -lh "$BINARY" | awk '{print "Size: " $5 " - ${{ matrix.name }}"}'
 
       - name: Rename binary
         shell: bash
@@ -142,8 +152,11 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Display downloaded files
-        run: ls -lh artifacts/
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
